@@ -23,51 +23,72 @@ def _run_pipeline():
     try:
         log("Step 1: importing modules...")
         from data_feed import fetch_nba_stats, fetch_sportsbook_lines
+
         log("Step 2: fetching stats...")
         stats_df = fetch_nba_stats()
-        log(f"Step 3: got {len(stats_df)} players. Fetching lines...")
+        log(f"Step 3: got {len(stats_df)} players.")
+
+        if stats_df.empty:
+            log("ERROR: No player stats returned. Check BallDontLie API.")
+            run_status["status"] = "error"
+            run_status["error"]  = "No player stats returned from BallDontLie API."
+            return
+
+        log("Step 4: fetching lines...")
         lines_df = fetch_sportsbook_lines()
-        log(f"Step 4: got {len(lines_df)} lines. Calculating projections...")
-        from projection_engine import calculate_projections
+        log(f"Step 5: got {len(lines_df)} lines.")
+
+        if lines_df.empty:
+            log("ERROR: No lines returned. Check ODDS_API_KEY.")
+            run_status["status"] = "error"
+            run_status["error"]  = "No lines returned."
+            return
+
+        log("Step 6: enriching with matchup data...")
         stats_df = _enrich(stats_df)
-        proj_df  = calculate_projections(stats_df)
-        log("Step 5: detecting edges...")
+
+        log("Step 7: calculating projections...")
+        from projection_engine import calculate_projections
+        proj_df = calculate_projections(stats_df)
+        log(f"Step 8: projections done for {len(proj_df)} players.")
+
+        log("Step 9: detecting edges...")
         from edge_detector import calculate_edge
-        edge_df  = calculate_edge(proj_df, lines_df)
-        log("Step 6: generating board...")
+        edge_df = calculate_edge(proj_df, lines_df)
+        bet_cols = [c for c in edge_df.columns if c.startswith("bet_")]
+        flagged  = edge_df[edge_df[bet_cols].any(axis=1)] if bet_cols else edge_df
+        log(f"Step 10: found {len(flagged)} edges.")
+
+        log("Step 11: generating board and logging bets...")
         from tracker_dashboard import generate_daily_edge_board, log_bets
         board = generate_daily_edge_board(edge_df)
         log_bets(board)
+
         run_status["status"]   = "complete"
         run_status["bets"]     = len(board)
         run_status["last_run"] = str(__import__("datetime").datetime.now())
-        log(f"Done. {len(board)} bets logged.")
+        log(f"✅ Done. {len(board)} bets logged.")
+
     except Exception as e:
         run_status["status"] = "error"
         run_status["error"]  = str(e)
-        run_status["log"].append(traceback.format_exc())
-        print(traceback.format_exc())
+        tb = traceback.format_exc()
+        run_status["log"].append(tb)
+        print(tb)
 
 
-def _enrich(stats_df, season="2024-25"):
+def _enrich(stats_df, season=2024):
     try:
-        from data_feed import get_todays_games, get_team_pace_stats
-        games      = get_todays_games()
-        pace_stats = get_team_pace_stats(season)
-        if not games or pace_stats.empty:
+        from data_feed import get_todays_games
+        games = get_todays_games()
+        if not games:
             return stats_df
         opp_map = {}
         for g in games:
             opp_map[g["home_team"]] = {"opponent": g["away_team"], "is_home": True}
             opp_map[g["away_team"]] = {"opponent": g["home_team"], "is_home": False}
-        league_avg = float(pace_stats["PACE"].mean())
         df = stats_df.copy()
-        def _pace(team):
-            m   = opp_map.get(team, {})
-            opp = m.get("opponent", "")
-            row = pace_stats[pace_stats["TEAM_ABBREVIATION"] == opp]
-            return round(float(row["PACE"].iloc[0]) / league_avg, 4) if not row.empty else 1.0
-        df["pace_adj"] = df["team"].apply(_pace)
+        df["pace_adj"] = 1.0
         df["opponent"] = df["team"].apply(lambda t: opp_map.get(t, {}).get("opponent", ""))
         df["is_home"]  = df["team"].apply(lambda t: opp_map.get(t, {}).get("is_home", False))
         return df

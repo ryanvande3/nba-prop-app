@@ -1,52 +1,188 @@
-import time
+# ─────────────────────────────────────────────
+#  data_feed.py  ·  uses BallDontLie API
+#  Free, no API key, works from cloud servers
+#  https://www.balldontlie.io
+# ─────────────────────────────────────────────
+
 import requests
 import pandas as pd
 from datetime import date
-from nba_api.stats.endpoints import (
-    playergamelog,
-    leaguegamefinder,
-    leaguedashteamstats,
-    commonplayerinfo,
-)
-from nba_api.stats.static import players
 from config import API_KEYS, TOP_20_PLAYERS
 import config
 
 TOP_PLAYERS = TOP_20_PLAYERS
-NBA_REQUEST_DELAY = 1.0   # increased delay for cloud servers
-NBA_TIMEOUT       = 10    # seconds before giving up on a request
+BASE_URL    = "https://api.balldontlie.io/v1"
 
 
-def fetch_nba_stats(season="2024-25"):
-    print("▶ Fetching NBA player stats...")
+# ─────────────────────────────────────────────
+#  Player lookup
+# ─────────────────────────────────────────────
+
+def _get_headers():
+    key = API_KEYS.get("balldontlie", "")
+    return {"Authorization": key} if key else {}
+
+
+def get_player_id(full_name):
+    try:
+        r = requests.get(f"{BASE_URL}/players",
+                         params={"search": full_name, "per_page": 5},
+                         headers=_get_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data:
+            print(f"  [WARN] Not found: {full_name}")
+            return None
+        # Prefer exact match
+        for p in data:
+            if f"{p['first_name']} {p['last_name']}".lower() == full_name.lower():
+                return p["id"]
+        return data[0]["id"]
+    except Exception as e:
+        print(f"  [ERROR] get_player_id {full_name}: {e}")
+        return None
+
+
+def get_player_team(full_name):
+    try:
+        r = requests.get(f"{BASE_URL}/players",
+                         params={"search": full_name, "per_page": 5},
+                         headers=_get_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data:
+            return "N/A"
+        for p in data:
+            if f"{p['first_name']} {p['last_name']}".lower() == full_name.lower():
+                return p.get("team", {}).get("abbreviation", "N/A")
+        return data[0].get("team", {}).get("abbreviation", "N/A")
+    except Exception as e:
+        print(f"  [ERROR] get_player_team {full_name}: {e}")
+        return "N/A"
+
+
+# ─────────────────────────────────────────────
+#  Season averages
+# ─────────────────────────────────────────────
+
+def get_season_averages(player_id, season=2024):
+    try:
+        r = requests.get(f"{BASE_URL}/season_averages",
+                         params={"season": season, "player_ids[]": player_id},
+                         headers=_get_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        return data[0] if data else {}
+    except Exception as e:
+        print(f"  [ERROR] season_averages {player_id}: {e}")
+        return {}
+
+
+def get_recent_games(player_id, last_n=15, season=2024):
+    try:
+        r = requests.get(f"{BASE_URL}/stats",
+                         params={"player_ids[]": player_id,
+                                 "seasons[]": season,
+                                 "per_page": last_n},
+                         headers=_get_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data:
+            return pd.DataFrame()
+        rows = []
+        for g in data:
+            rows.append({
+                "PTS":  g.get("pts", 0) or 0,
+                "REB":  g.get("reb", 0) or 0,
+                "AST":  g.get("ast", 0) or 0,
+                "STL":  g.get("stl", 0) or 0,
+                "BLK":  g.get("blk", 0) or 0,
+                "FG3M": g.get("fg3m", 0) or 0,
+                "MIN":  _parse_min(g.get("min", "0")),
+            })
+        df = pd.DataFrame(rows)
+        df["PRA"] = df["PTS"] + df["REB"] + df["AST"]
+        return df
+    except Exception as e:
+        print(f"  [ERROR] recent_games {player_id}: {e}")
+        return pd.DataFrame()
+
+
+def _parse_min(min_str):
+    try:
+        if ":" in str(min_str):
+            parts = str(min_str).split(":")
+            return float(parts[0]) + float(parts[1]) / 60
+        return float(min_str or 0)
+    except Exception:
+        return 0.0
+
+
+# ─────────────────────────────────────────────
+#  fetch_nba_stats  (main interface)
+# ─────────────────────────────────────────────
+
+def fetch_nba_stats(season=2024):
+    print("▶ Fetching NBA player stats via BallDontLie...")
     rows = []
     for name in TOP_20_PLAYERS:
-        print(f"  Fetching: {name}")
-        bundle = get_player_stats_bundle(name, season=season)
-        if not bundle:
-            print(f"  [SKIP] {name}")
+        print(f"  {name}...")
+        pid = get_player_id(name)
+        if not pid:
             continue
-        info     = bundle["info"]
-        game_log = bundle["game_log"]
-        if game_log.empty:
-            print(f"  [SKIP] {name} — empty log")
+
+        avgs     = get_season_averages(pid, season)
+        game_log = get_recent_games(pid, last_n=15, season=season)
+        team     = get_player_team(name)
+
+        if not avgs and game_log.empty:
+            print(f"  [SKIP] {name} — no data")
             continue
-        avg = game_log[["MIN","PTS","REB","AST","STL","BLK","FG3M","PRA"]].mean()
+
+        # Use season averages if available, else compute from game log
+        if avgs:
+            pts  = avgs.get("pts",  0) or 0
+            reb  = avgs.get("reb",  0) or 0
+            ast  = avgs.get("ast",  0) or 0
+            stl  = avgs.get("stl",  0) or 0
+            blk  = avgs.get("blk",  0) or 0
+            fg3m = avgs.get("fg3m", 0) or 0
+            mins = _parse_min(avgs.get("min", 0))
+        elif not game_log.empty:
+            pts  = game_log["PTS"].mean()
+            reb  = game_log["REB"].mean()
+            ast  = game_log["AST"].mean()
+            stl  = game_log["STL"].mean()
+            blk  = game_log["BLK"].mean()
+            fg3m = game_log["FG3M"].mean()
+            mins = game_log["MIN"].mean()
+        else:
+            continue
+
         rows.append({
             "player_name": name,
-            "team":        info.get("team", ""),
-            "position":    info.get("position", ""),
+            "team":        team,
+            "position":    avgs.get("position", ""),
+            "MIN":         round(mins, 2),
+            "PTS":         round(pts,  2),
+            "REB":         round(reb,  2),
+            "AST":         round(ast,  2),
+            "STL":         round(stl,  2),
+            "BLK":         round(blk,  2),
+            "FG3M":        round(fg3m, 2),
+            "PRA":         round(pts + reb + ast, 2),
             "_game_log":   game_log,
-            **{col: round(avg[col], 2) for col in avg.index},
         })
-        print(f"  ✓ {name}")
+        print(f"  ✓ {name} ({team}) — {pts:.1f}pts {reb:.1f}reb {ast:.1f}ast")
 
     df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df[df["player_name"].isin(TOP_20_PLAYERS)]
     print(f"  Loaded {len(df)} players.")
     return df
 
+
+# ─────────────────────────────────────────────
+#  fetch_sportsbook_lines
+# ─────────────────────────────────────────────
 
 def fetch_sportsbook_lines():
     fanatics_key = API_KEYS.get("sportsbook", "")
@@ -64,120 +200,14 @@ def fetch_sportsbook_lines():
 
 
 def _fetch_fanatics_lines(api_key):
-    url = "https://api.fanatics.com/sportsbook/lines/nba"
     try:
-        r = requests.get(url, headers={"X-API-KEY": api_key}, timeout=15)
+        r = requests.get("https://api.fanatics.com/sportsbook/lines/nba",
+                         headers={"X-API-KEY": api_key}, timeout=15)
         r.raise_for_status()
         return pd.DataFrame(r.json())
     except Exception as e:
-        print(f"  [WARN] Fanatics unavailable ({e}). Falling back to Odds API.")
+        print(f"  [WARN] Fanatics unavailable ({e}). Falling back.")
         return pd.DataFrame()
-
-
-def get_player_id(full_name):
-    try:
-        matches = players.find_players_by_full_name(full_name)
-        if not matches:
-            print(f"  [WARN] Player not found: {full_name}")
-            return None
-        active = [p for p in matches if p["is_active"]]
-        return (active or matches)[0]["id"]
-    except Exception as e:
-        print(f"  [ERROR] get_player_id {full_name}: {e}")
-        return None
-
-
-def get_player_game_log(player_id, season="2024-25", last_n=25):
-    time.sleep(NBA_REQUEST_DELAY)
-    try:
-        log = playergamelog.PlayerGameLog(
-            player_id=player_id, season=season,
-            season_type_all_star="Regular Season",
-            timeout=NBA_TIMEOUT,
-        )
-        df = log.get_data_frames()[0].head(last_n)
-        if df.empty:
-            return pd.DataFrame()
-        df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"])
-        df["PRA"]  = df["PTS"] + df["REB"] + df["AST"]
-        df["HOME"] = df["MATCHUP"].apply(lambda x: 1 if "vs." in x else 0)
-        df["OPP"]  = df["MATCHUP"].apply(
-            lambda x: x.split("vs. ")[-1] if "vs." in x else x.split("@ ")[-1]
-        )
-        keep = ["GAME_DATE","MATCHUP","HOME","OPP","WL","MIN",
-                "PTS","REB","AST","STL","BLK","FG3M","PRA"]
-        return df[keep]
-    except Exception as e:
-        print(f"  [ERROR] game log for {player_id}: {e}")
-        return pd.DataFrame()
-
-
-def get_player_stats_bundle(player_name, season="2024-25"):
-    pid = get_player_id(player_name)
-    if pid is None:
-        return {}
-    time.sleep(NBA_REQUEST_DELAY)
-    try:
-        info_ep = commonplayerinfo.CommonPlayerInfo(
-            player_id=pid, timeout=NBA_TIMEOUT)
-        info_df = info_ep.get_data_frames()[0]
-        info = {
-            "id":       pid,
-            "name":     player_name,
-            "team":     info_df["TEAM_ABBREVIATION"].iloc[0],
-            "position": info_df["POSITION"].iloc[0],
-        }
-    except Exception as e:
-        print(f"  [ERROR] player info for {player_name}: {e}")
-        info = {"id": pid, "name": player_name, "team": "N/A", "position": "N/A"}
-    return {"info": info, "game_log": get_player_game_log(pid, season=season)}
-
-
-def get_team_pace_stats(season="2024-25"):
-    time.sleep(NBA_REQUEST_DELAY)
-    try:
-        stats = leaguedashteamstats.LeagueDashTeamStats(
-            season=season, measure_type_simple="Advanced",
-            timeout=NBA_TIMEOUT,
-        )
-        df = stats.get_data_frames()[0]
-        return df[["TEAM_ABBREVIATION","TEAM_NAME","PACE","DEF_RATING",
-                   "OPP_PTS_PAINT","OPP_PTS_FB","OPP_PTS_2ND_CHANCE"]]
-    except Exception as e:
-        print(f"  [ERROR] pace stats: {e}")
-        return pd.DataFrame()
-
-
-def get_todays_games():
-    today_str = date.today().strftime("%m/%d/%Y")
-    time.sleep(NBA_REQUEST_DELAY)
-    try:
-        finder = leaguegamefinder.LeagueGameFinder(
-            date_from_nullable=today_str, date_to_nullable=today_str,
-            league_id_nullable="00", timeout=NBA_TIMEOUT,
-        )
-        df = finder.get_data_frames()[0]
-        if df.empty:
-            return []
-        games, seen = [], set()
-        for _, row in df.iterrows():
-            gid = row["GAME_ID"]
-            if gid in seen:
-                continue
-            seen.add(gid)
-            matchup = row["MATCHUP"]
-            if "vs." in matchup:
-                home = row["TEAM_ABBREVIATION"]
-                away = matchup.split("vs. ")[-1].strip()
-            else:
-                away = row["TEAM_ABBREVIATION"]
-                home = matchup.split("@ ")[-1].strip()
-            games.append({"game_id": gid, "home_team": home,
-                          "away_team": away, "date": row["GAME_DATE"]})
-        return games
-    except Exception as e:
-        print(f"  [ERROR] schedule: {e}")
-        return []
 
 
 def get_prop_lines(market):
@@ -239,7 +269,6 @@ def get_all_prop_lines():
     for market in config.ODDS_MARKETS:
         print(f"  Fetching lines: {market}")
         all_lines.extend(get_prop_lines(market))
-        time.sleep(0.3)
     if not all_lines:
         return pd.DataFrame()
     df = pd.DataFrame(all_lines)
@@ -247,23 +276,30 @@ def get_all_prop_lines():
     return df
 
 
-def load_todays_data(player_list=None, season="2024-25"):
-    if player_list is None:
-        player_list = TOP_20_PLAYERS
-    print("▶ Loading schedule...")
-    games = get_todays_games()
-    print(f"  Found {len(games)} game(s).")
-    print("▶ Loading pace stats...")
-    pace_stats = get_team_pace_stats(season)
-    print("▶ Loading lines...")
-    lines = fetch_sportsbook_lines()
-    if "player_name" in lines.columns:
-        lines = lines.rename(columns={"player_name": "player"})
-    print("▶ Loading player logs...")
-    player_data = {}
-    for name in player_list:
-        bundle = get_player_stats_bundle(name, season)
-        if bundle:
-            player_data[name] = bundle
-    return {"games": games, "pace_stats": pace_stats,
-            "lines": lines, "players": player_data}
+def get_todays_games():
+    try:
+        today = date.today().isoformat()
+        r = requests.get(f"{BASE_URL}/games",
+                         params={"dates[]": today, "per_page": 15},
+                         headers=_get_headers(), timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        games = []
+        for g in data:
+            games.append({
+                "game_id":   g["id"],
+                "home_team": g["home_team"]["abbreviation"],
+                "away_team": g["visitor_team"]["abbreviation"],
+                "date":      g["date"],
+            })
+        print(f"  Found {len(games)} game(s) today.")
+        return games
+    except Exception as e:
+        print(f"  [ERROR] todays games: {e}")
+        return []
+
+
+def get_team_pace_stats(season=2024):
+    # BallDontLie doesn't have pace stats
+    # Return empty — projection engine defaults to 1.0 multiplier
+    return pd.DataFrame()

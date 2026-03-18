@@ -1,38 +1,27 @@
-# ─────────────────────────────────────────────
-#  config.py  ·  NBA Prop Research Tool
-# ─────────────────────────────────────────────
-
 import os
 from dotenv import load_dotenv
 
-load_dotenv()   # loads .env file automatically
+load_dotenv()
 
-# ── API Keys (from .env) ──────────────────────
 API_KEYS = {
-    "nba_stats":  os.getenv("NBA_STATS_API_KEY",  ""),
-    "sportsbook": os.getenv("SPORTSBOOK_API_KEY", ""),
-    "odds_api":   os.getenv("ODDS_API_KEY",       ""),
+    "nba_stats":    os.getenv("NBA_STATS_API_KEY",  ""),
+    "sportsbook":   os.getenv("SPORTSBOOK_API_KEY", ""),
+    "odds_api":     os.getenv("ODDS_API_KEY",       ""),
+    "balldontlie":  os.getenv("BALLDONTLIE_API_KEY",""),
 }
 
-THE_ODDS_API_KEY = API_KEYS["odds_api"]   # convenience alias
+THE_ODDS_API_KEY = API_KEYS["odds_api"]
 
-# ── Database ──────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///nba_props.db")
-# SQLite fallback means zero setup required — swap for Postgres in .env
-
-# ── Google Sheets ─────────────────────────────
+DATABASE_URL             = os.getenv("DATABASE_URL", "sqlite:///nba_props.db")
 GOOGLE_SHEETS_CREDS_JSON = os.getenv("GOOGLE_SHEETS_CREDS_JSON", "")
 EDGE_BOARD_SHEET_ID      = os.getenv("EDGE_BOARD_SHEET_ID",      "")
+FLASK_SECRET_KEY         = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
+FLASK_PORT               = int(os.getenv("FLASK_PORT", 5000))
 
-# ── Flask ─────────────────────────────────────
-FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
-FLASK_PORT       = int(os.getenv("FLASK_PORT", 5000))
-
-# ── The Odds API Settings ─────────────────────
-ODDS_BASE_URL  = "https://api.the-odds-api.com/v4"
-ODDS_SPORT     = "basketball_nba"
-ODDS_REGION    = "us"
-ODDS_MARKETS   = [
+ODDS_BASE_URL   = "https://api.the-odds-api.com/v4"
+ODDS_SPORT      = "basketball_nba"
+ODDS_REGION     = "us"
+ODDS_MARKETS    = [
     "player_points",
     "player_rebounds",
     "player_assists",
@@ -43,7 +32,6 @@ ODDS_MARKETS   = [
 ]
 ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "prizepicks"]
 
-# ── Edge Thresholds (stat units) ──────────────
 EDGE_THRESHOLDS = {
     "points":   3,
     "assists":  2,
@@ -59,20 +47,17 @@ STRONG_EDGE_PCT      = 10.0
 SHARP_MOVEMENT_UNITS = 1.5
 MIN_SAMPLE_GAMES     = 10
 
-# ── Unit Sizing ───────────────────────────────
 UNITS = {
     "base":            1,
     "high_confidence": 2,
 }
 
-# ── Projection Settings ───────────────────────
 ROLLING_WINDOW_SHORT = 5
 ROLLING_WINDOW_LONG  = 15
 HOME_AWAY_SPLIT      = True
 PACE_ADJUST          = True
 BACK_TO_BACK_PENALTY = 0.06
 
-# ── Prop Markets ──────────────────────────────
 PROP_MARKETS = {
     "points":   {"label": "PTS", "odds_key": "player_points"},
     "rebounds": {"label": "REB", "odds_key": "player_rebounds"},
@@ -83,7 +68,6 @@ PROP_MARKETS = {
     "pra":      {"label": "PRA", "odds_key": "player_points_rebounds_assists"},
 }
 
-# ── Top 20 Players ────────────────────────────
 TOP_PLAYERS = TOP_20_PLAYERS = [
     "Nikola Jokic",
     "Tyrese Haliburton",
@@ -107,7 +91,6 @@ TOP_PLAYERS = TOP_20_PLAYERS = [
     "Julius Randle",
 ]
 
-# ── Logging (CSV fallback) ────────────────────
 LOG_DIR         = "logs"
 BET_LOG_FILE    = "logs/bet_tracker.csv"
 EDGE_BOARD_FILE = "logs/daily_edge_board.csv"
